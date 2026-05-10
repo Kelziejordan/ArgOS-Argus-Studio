@@ -41,7 +41,6 @@ export async function POST(request: NextRequest) {
       tools: [{ functionDeclarations: [triggerArgusTool] }],
     })
 
-    // Map our chat history to the format Gemini expects
     const geminiHistory = history.map((msg: { role: string, content: string }) => ({
       role: msg.role === 'assistant' ? 'model' : 'user',
       parts: [{ text: msg.content || '' }]
@@ -51,13 +50,15 @@ export async function POST(request: NextRequest) {
     const result = await chat.sendMessage(message)
     const response = result.response
 
-    // Check if Gemini decided to call our tool
+    // --- THIS IS THE CORRECTED CODE ---
     const functionCalls = response.functionCalls()
-    if (functionCalls && functionCalls.length > 0) {
-      const call = functionCalls[0]
+    // We convert the special 'iterator' object into a normal array
+    const toolCalls = functionCalls ? Array.from(functionCalls) : []
+
+    if (toolCalls.length > 0) {
+      const call = toolCalls[0] // Now we can safely access the first element
       if (call.name === 'trigger_argus_pipeline') {
         const args = call.args as { feature_spec: string, tier: number }
-        // If it did, send the special 'handoff' response to the frontend
         return NextResponse.json({
           type: 'handoff',
           action: 'trigger_argus_pipeline',
@@ -65,6 +66,7 @@ export async function POST(request: NextRequest) {
         })
       }
     }
+    // --- END OF CORRECTION ---
 
     // If no tool was called, just send back the text response
     return NextResponse.json({ type: 'message', content: response.text() })
