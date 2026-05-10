@@ -1,4 +1,5 @@
 import type { Metadata } from 'next'
+import { Analytics } from '@vercel/analytics/next'
 
 // This is a basic setup for your app's metadata (like the browser tab title)
 export const metadata: Metadata = {
@@ -13,6 +14,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
       <body>
         {/* The 'children' here will be your page.tsx */}
         {children}
+        <Analytics />
       </body>
     </html>
   )
