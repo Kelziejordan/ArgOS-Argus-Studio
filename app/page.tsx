@@ -1,131 +1,91 @@
-// filepath: app/page.tsx
-
 'use client'
-import { useState, useRef, useEffect, type KeyboardEvent } from 'react'
 
-// A simplified placeholder for the real hook. We'll add the full provider back later.
-function useArgusSession() {
-  const submitMessage = async (message: string) => {
-    console.log("ARGUS Pipeline would be triggered with:", message)
-    // In the full app, this will call the real streaming API
-    alert(`HANDOFF TO ARGUS: \nBuilding feature: "${message}"`)
-  }
-  return { submitMessage }
-}
+import { useState } from 'react'
 
+export type ActiveAgent = 'argos' | 'argus'
 
-export default function CommandCenterPage() {
-  // This state will eventually toggle between the chat and the 9-panel grid
-  const [activeSystem, setActiveSystem] = useState<'argos' | 'argus'>('argos')
-  
-  // State for the ArgOS chat UI
-  const [argosInput, setArgosInput] = useState('')
-  const [isArgosLoading, setIsArgosLoading] = useState(false)
-  const [argosMessages, setArgosMessages] = useState([
-    { 
-      role: 'assistant', 
-      content: 'ArgOS Evolution standing by. The foundation is stable. What are we building today?' 
-    }
-  ])
-  
-  const chatEndRef = useRef<HTMLDivElement>(null)
-  const { submitMessage: startArgusPipeline } = useArgusSession()
+export default function StudioPage() {
+  const [activeAgent, setActiveAgent] = useState<ActiveAgent>('argos')
 
-  // Auto-scroll the chat
-  useEffect(() => {
-    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' })
-  }, [argosMessages])
-
-  const handleArgosSubmit = async () => {
-    if (!argosInput.trim() || isArgosLoading) return
-    const userText = argosInput.trim()
-    setArgosInput('')
-    
-    const newHistory = [...argosMessages, { role: 'user', content: userText }]
-    setArgosMessages(newHistory)
-    setIsArgosLoading(true)
-
-    try {
-      // This calls the Gemini API route we will create next
-      const res = await fetch('/api/argos/chat', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: userText, history: argosMessages })
-      })
-
-      if (!res.ok) {
-        throw new Error('API request failed')
-      }
-
-      const data = await res.json()
-
-      if (data.type === 'handoff') {
-        setArgosMessages(prev =>[...prev, { role: 'assistant', content: `*Handoff initiated. Delegating to ARGUS V10 to build:* \n\n${data.payload.feature_spec}` }])
-        // For now, we'll just show an alert. Later, this will switch the UI.
-        await startArgusPipeline(data.payload.feature_spec)
-      } else {
-        setArgosMessages(prev => [...prev, { role: 'assistant', content: data.content }])
-      }
-
-    } catch (error) {
-      console.error(error)
-      setArgosMessages(prev => [...prev, { role: 'assistant', content: '⚠️ System Error: Could not connect to the ArgOS API.' }])
-    } finally {
-      setIsArgosLoading(false)
-    }
-  }
-
-  const handleKeyDown = (e: KeyboardEvent<HTMLTextAreaElement>) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault()
-      handleArgosSubmit()
-    }
-  }
-
-  // This is the main chat UI
   return (
-    <main style={{ backgroundColor: '#09090b', color: 'white', fontFamily: 'sans-serif', height: '100vh', display: 'flex', flexDirection: 'column' }}>
-      <header style={{ padding: '1rem 1.5rem', borderBottom: '1px solid #27272a', backgroundColor: '#18181b' }}>
-        <h1 style={{ fontFamily: 'monospace', fontSize: '0.875rem', fontWeight: '600', color: '#d4d4d8' }}>ArgOS Evolution</h1>
+    <main className="h-screen overflow-hidden bg-zinc-950 flex flex-col">
+
+      <header className="flex-shrink-0 flex items-center justify-between px-4 py-2 border-b border-zinc-800 bg-zinc-900/80">
+        <div className="flex items-center gap-3">
+          <span className="w-2 h-2 rounded-full bg-blue-500 animate-pulse" />
+          <span className="text-zinc-100 text-xs font-mono font-bold tracking-widest uppercase">ArgOS x ARGUS Studio</span>
+        </div>
+        <nav className="flex items-center gap-1 bg-zinc-900 border border-zinc-800 rounded-lg p-1">
+          <button
+            type="button"
+            onClick={() => setActiveAgent('argos')}
+            className={`px-3 py-1 rounded text-xs font-mono font-semibold transition-all ${
+              activeAgent === 'argos'
+                ? 'bg-blue-600 text-white border border-blue-500'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            ArgOS <span className="opacity-60 font-normal">Brain</span>
+          </button>
+          <button
+            type="button"
+            onClick={() => setActiveAgent('argus')}
+            className={`px-3 py-1 rounded text-xs font-mono font-semibold transition-all ${
+              activeAgent === 'argus'
+                ? 'bg-amber-600 text-zinc-950 border border-amber-500'
+                : 'text-zinc-400 hover:text-zinc-200'
+            }`}
+          >
+            ARGUS <span className="opacity-60 font-normal">Engineer</span>
+          </button>
+        </nav>
       </header>
 
-      <div style={{ flex: 1, overflowY: 'auto', padding: '1.5rem' }}>
-        <div style={{ maxWidth: '48rem', margin: '0 auto', display: 'flex', flexDirection: 'column', gap: '1.5rem' }}>
-          {argosMessages.map((msg, idx) => (
-            <div key={idx} style={{ display: 'flex', flexDirection: 'column', alignItems: msg.role === 'user' ? 'flex-end' : 'flex-start' }}>
-              <span style={{ fontSize: '0.625rem', fontFamily: 'monospace', color: '#71717a', marginBottom: '0.25rem', textTransform: 'uppercase' }}>
-                {msg.role === 'user' ? 'You' : 'ArgOS'}
-              </span>
-              <div style={{ padding: '0.75rem 1rem', borderRadius: '0.5rem', maxWidth: '85%', fontSize: '0.875rem', lineHeight: '1.625', whiteSpace: 'pre-wrap', backgroundColor: msg.role === 'user' ? '#27272a' : '#18181b', border: '1px solid #3f3f46' }}>
-                {msg.content}
-              </div>
+      <div className="flex-1 min-h-0 flex items-center justify-center">
+        {activeAgent === 'argos' ? (
+          <div className="flex flex-col items-center gap-4 text-center px-6">
+            <div className="w-16 h-16 rounded-full bg-blue-950 border border-blue-800 flex items-center justify-center">
+              <span className="text-blue-400 text-2xl">🧠</span>
             </div>
-          ))}
-          {isArgosLoading && <p style={{color: '#a1a1aa'}}>ArgOS is thinking...</p>}
-          <div ref={chatEndRef} />
-        </div>
+            <h2 className="text-zinc-200 text-sm font-mono font-semibold">ArgOS Evolution — Online</h2>
+            <p className="text-zinc-600 text-xs font-mono max-w-xs">
+              Project Manager ready. Switch to ARGUS Engineer to begin building.
+            </p>
+            <button
+              type="button"
+              onClick={() => setActiveAgent('argus')}
+              className="px-4 py-2 rounded-lg text-xs font-mono bg-blue-600 hover:bg-blue-500 text-white border border-blue-500 transition-colors"
+            >
+              Launch ARGUS Engineer →
+            </button>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center gap-4 text-center px-6">
+            <div className="w-16 h-16 rounded-full bg-amber-950 border border-amber-800 flex items-center justify-center">
+              <span className="text-amber-400 text-2xl">⚙️</span>
+            </div>
+            <h2 className="text-zinc-200 text-sm font-mono font-semibold">ARGUS V10 — Online</h2>
+            <p className="text-zinc-600 text-xs font-mono max-w-xs">
+              Lead Engineer ready. 17-step pipeline standing by.
+            </p>
+            <button
+              type="button"
+              onClick={() => setActiveAgent('argos')}
+              className="px-4 py-2 rounded-lg text-xs font-mono bg-amber-600 hover:bg-amber-500 text-zinc-950 border border-amber-500 transition-colors"
+            >
+              ← Return to ArgOS Brain
+            </button>
+          </div>
+        )}
       </div>
 
-      <div style={{ padding: '1.5rem', borderTop: '1px solid #27272a', backgroundColor: '#09090b' }}>
-        <div style={{ maxWidth: '48rem', margin: '0 auto', display: 'flex', gap: '0.5rem' }}>
-          <textarea
-            value={argosInput}
-            onChange={(e) => setArgosInput(e.target.value)}
-            onKeyDown={handleKeyDown}
-            placeholder="Discuss project state or ask ArgOS to build a feature..."
-            style={{ flex: 1, backgroundColor: '#18181b', border: '1px solid #3f3f46', borderRadius: '0.5rem', padding: '0.75rem 1rem', color: 'white', resize: 'none' }}
-            rows={2}
-            disabled={isArgosLoading}
-          />
-          <button
-            onClick={handleArgosSubmit}
-            disabled={!argosInput.trim() || isArgosLoading}
-            style={{ padding: '0 1.5rem', backgroundColor: '#2563eb', borderRadius: '0.5rem', color: 'white', fontFamily: 'monospace', fontSize: '0.75rem', cursor: 'pointer' }}
-          >
-            Send
-          </button>
-        </div>
-      </div>
+      <footer className="flex-shrink-0 flex items-center justify-between px-4 py-1.5 border-t border-zinc-900">
+        <span className="text-zinc-700 text-xs font-mono">
+          {activeAgent === 'argos' ? '🧠 ArgOS — Project Manager' : '⚙️ ARGUS v10 — Lead Engineer'}
+        </span>
+        <span className="text-zinc-800 text-xs font-mono">ArgOS Evolution · ARGUS V10</span>
+      </footer>
+
     </main>
   )
 }
