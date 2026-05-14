@@ -22,7 +22,7 @@ function isRateLimited(ip: string): boolean {
   return false
 }
 
-function getApiKeys(): string[] {
+function getAnthropicKeys(): string[] {
   const keys: string[] = []
   for (let i = 1; i <= 10; i++) {
     const key = process.env[`ANTHROPIC_API_KEY_${i}`]
@@ -58,7 +58,9 @@ OPERATING STATES: SHIP (usable now) | FREEZE (stable) | EXPAND (next upgrade)
 
 OUTPUT: Short sections. Bullets preferred. Mobile-readable. No filler.`
 
-function createTextStream(anthropicStream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+function createTextStream(
+  anthropicStream: ReadableStream<Uint8Array>
+): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
   const decoder = new TextDecoder()
   return new ReadableStream<Uint8Array>({
@@ -96,8 +98,119 @@ function createTextStream(anthropicStream: ReadableStream<Uint8Array>): Readable
   })
 }
 
+async function tryAnthropic(
+  messages: Array<{ role: string; content: string }>,
+  systemPrompt: string
+): Promise<NextResponse | null> {
+  const keys = getAnthropicKeys()
+  for (const apiKey of keys) {
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'anthropic-version': '2023-06-01',
+          'x-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 8000,
+          system: systemPrompt,
+          messages,
+          stream: true,
+        }),
+      })
+      if (res.status === 429 || res.status === 402) continue
+      if (!res.ok || !res.body) continue
+      return new NextResponse(createTextStream(res.body), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Provider': 'anthropic',
+        },
+      })
+    } catch { continue }
+  }
+  return null
+}
+
+async function tryGemini(
+  messages: Array<{ role: string; content: string }>,
+  systemPrompt: string
+): Promise<NextResponse | null> {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) return null
+
+  const geminiMessages = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }))
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: systemPrompt }] },
+          contents: geminiMessages,
+          generationConfig: { maxOutputTokens: 8000, temperature: 0.7 },
+        }),
+      }
+    )
+
+    if (!res.ok || !res.body) return null
+
+    const encoder = new TextEncoder()
+    const decoder = new TextDecoder()
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const reader = res.body!.getReader()
+        let buffer = ''
+        try {
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            const lines = buffer.split('\n')
+            buffer = lines.pop() ?? ''
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue
+              const data = line.slice(6).trim()
+              if (data === '[DONE]') continue
+              try {
+                const event = JSON.parse(data)
+                const text = event?.candidates?.[0]?.content?.parts?.[0]?.text
+                if (typeof text === 'string') {
+                  controller.enqueue(encoder.encode(text))
+                }
+              } catch { /* skip */ }
+            }
+          }
+        } finally {
+          reader.releaseLock()
+          controller.close()
+        }
+      },
+    })
+
+    return new NextResponse(stream, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Provider': 'gemini',
+      },
+    })
+  } catch { return null }
+}
+
 export async function POST(request: NextRequest) {
-  const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
+  const clientIp =
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
 
   if (isRateLimited(clientIp)) {
     return NextResponse.json({ error: 'Rate limited.' }, { status: 429 })
@@ -125,52 +238,16 @@ export async function POST(request: NextRequest) {
     ? `${ARGOS_SYSTEM_PROMPT}\n\nCURRENT PROJECT CONTEXT:\n${projectContext}`
     : ARGOS_SYSTEM_PROMPT
 
-  const apiKeys = getApiKeys()
-  if (apiKeys.length === 0) {
-    return NextResponse.json({ error: 'No API keys configured.' }, { status: 500 })
-  }
+  const messages = [...history, { role: 'user', content: message }]
 
-  for (let i = 0; i < apiKeys.length; i++) {
-    const apiKey = apiKeys[i]
-    try {
-      const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'anthropic-version': '2023-06-01',
-          'x-api-key': apiKey!,
-        },
-        body: JSON.stringify({
-          model: 'claude-sonnet-4-20250514',
-          max_tokens: 8000,
-          system: systemPrompt,
-          messages: [...history, { role: 'user', content: message }],
-          stream: true,
-        }),
-      })
+  const anthropicResult = await tryAnthropic(messages, systemPrompt)
+  if (anthropicResult) return anthropicResult
 
-      if (anthropicResponse.status === 429 || anthropicResponse.status === 402) {
-        continue
-      }
-
-      if (!anthropicResponse.ok || !anthropicResponse.body) {
-        continue
-      }
-
-      return new NextResponse(createTextStream(anthropicResponse.body), {
-        status: 200,
-        headers: {
-          'Content-Type': 'text/plain; charset=utf-8',
-          'Cache-Control': 'no-store',
-        },
-      })
-    } catch {
-      continue
-    }
-  }
+  const geminiResult = await tryGemini(messages, systemPrompt)
+  if (geminiResult) return geminiResult
 
   return NextResponse.json(
-    { error: 'All API keys exhausted or unavailable. Please add credits.' },
+    { error: 'All providers exhausted. Please add API credits.' },
     { status: 503 }
   )
 }
