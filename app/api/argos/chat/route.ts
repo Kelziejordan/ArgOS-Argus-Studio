@@ -22,6 +22,17 @@ function isRateLimited(ip: string): boolean {
   return false
 }
 
+function getApiKeys(): string[] {
+  const keys: string[] = []
+  for (let i = 1; i <= 10; i++) {
+    const key = process.env[`ANTHROPIC_API_KEY_${i}`]
+    if (key) keys.push(key)
+  }
+  const fallback = process.env.ANTHROPIC_API_KEY
+  if (fallback && !keys.includes(fallback)) keys.push(fallback)
+  return keys
+}
+
 const ARGOS_SYSTEM_PROMPT = `You are ArgOS Evolution — a governed personal operating system and senior project partner.
 
 Your role: You are the BRAIN. You talk to the user, manage project state, plan features, and decide what needs to be built. ARGUS v10 is the HANDS. You do NOT write implementation code yourself. You architect, plan, decide, and delegate.
@@ -114,36 +125,52 @@ export async function POST(request: NextRequest) {
     ? `${ARGOS_SYSTEM_PROMPT}\n\nCURRENT PROJECT CONTEXT:\n${projectContext}`
     : ARGOS_SYSTEM_PROMPT
 
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) {
-    return NextResponse.json({ error: 'Server configuration error.' }, { status: 500 })
+  const apiKeys = getApiKeys()
+  if (apiKeys.length === 0) {
+    return NextResponse.json({ error: 'No API keys configured.' }, { status: 500 })
   }
 
-  const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'anthropic-version': '2023-06-01',
-      'x-api-key': apiKey,
-    },
-    body: JSON.stringify({
-      model: 'claude-sonnet-4-20250514',
-      max_tokens: 8000,
-      system: systemPrompt,
-      messages: [...history, { role: 'user', content: message }],
-      stream: true,
-    }),
-  })
+  for (let i = 0; i < apiKeys.length; i++) {
+    const apiKey = apiKeys[i]
+    try {
+      const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'anthropic-version': '2023-06-01',
+          'x-api-key': apiKey!,
+        },
+        body: JSON.stringify({
+          model: 'claude-sonnet-4-20250514',
+          max_tokens: 8000,
+          system: systemPrompt,
+          messages: [...history, { role: 'user', content: message }],
+          stream: true,
+        }),
+      })
 
-  if (!anthropicResponse.ok || !anthropicResponse.body) {
-    return NextResponse.json({ error: 'Upstream API error.' }, { status: anthropicResponse.status })
+      if (anthropicResponse.status === 429 || anthropicResponse.status === 402) {
+        continue
+      }
+
+      if (!anthropicResponse.ok || !anthropicResponse.body) {
+        continue
+      }
+
+      return new NextResponse(createTextStream(anthropicResponse.body), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-store',
+        },
+      })
+    } catch {
+      continue
+    }
   }
 
-  return new NextResponse(createTextStream(anthropicResponse.body), {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-store',
-    },
-  })
+  return NextResponse.json(
+    { error: 'All API keys exhausted or unavailable. Please add credits.' },
+    { status: 503 }
+  )
 }
