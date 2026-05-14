@@ -21,6 +21,17 @@ function isRateLimited(ip: string): boolean {
   return false
 }
 
+function getAnthropicKeys(): string[] {
+  const keys: string[] = []
+  for (let i = 1; i <= 10; i++) {
+    const key = process.env[`ANTHROPIC_API_KEY_${i}`]
+    if (key) keys.push(key)
+  }
+  const fallback = process.env.ANTHROPIC_API_KEY
+  if (fallback && !keys.includes(fallback)) keys.push(fallback)
+  return keys
+}
+
 const ARGUS_SYSTEM_PROMPT = `You are ARGUS — a Principal-Level AI Software Architect. Your purpose is to transform ideas into production-grade, premium-tier applications that are architecturally sound, observable, performant, and built to a standard that commands respect.
 
 NINE CORE ENGINEERING MANDATES:
@@ -48,17 +59,19 @@ P12: Mandate compliance checklist | P13: ASCII directory tree
 P14: CLEARANCE GATE — pause and await: APPROVE / AMEND / CHALLENGE / SIMPLIFY
 
 PHASE 2 (implementation):
-P15: Layer-by-layer code generation (types→utils→hooks→boundaries→components→shell)
+P15: Layer-by-layer code generation
 P16: Architecture Retrospective | P17: Protocol Memory Update
 
-OPPORTUNITY DETECTION: When you identify genuine opportunities in the domain being architected, emit:
+OPPORTUNITY DETECTION:
 <argus_opportunity>
 {"title":"string","domain":"string","effort":"low|medium|high","confidence":"speculative|likely|strong","revenue_model":"string","description":"2-3 sentences"}
 </argus_opportunity>
 
 Execute with architectural rigor. Mediocrity is an architectural failure.`
 
-function createTextStream(anthropicStream: ReadableStream<Uint8Array>): ReadableStream<Uint8Array> {
+function createAnthropicStream(
+  anthropicStream: ReadableStream<Uint8Array>
+): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder()
   const decoder = new TextDecoder()
   return new ReadableStream<Uint8Array>({
@@ -96,8 +109,117 @@ function createTextStream(anthropicStream: ReadableStream<Uint8Array>): Readable
   })
 }
 
+async function tryAnthropic(
+  messages: Array<{ role: string; content: string }>
+): Promise<NextResponse | null> {
+  const keys = getAnthropicKeys()
+  for (const apiKey of keys) {
+    try {
+      const res = await fetch('https://api.anthropic.com/v1/messages', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'anthropic-version': '2023-06-01',
+          'x-api-key': apiKey,
+        },
+        body: JSON.stringify({
+          model: 'claude-opus-4-20250514',
+          max_tokens: 16000,
+          system: ARGUS_SYSTEM_PROMPT,
+          messages,
+          stream: true,
+        }),
+      })
+      if (res.status === 429 || res.status === 402) continue
+      if (!res.ok || !res.body) continue
+      return new NextResponse(createAnthropicStream(res.body), {
+        status: 200,
+        headers: {
+          'Content-Type': 'text/plain; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'X-Provider': 'anthropic',
+        },
+      })
+    } catch { continue }
+  }
+  return null
+}
+
+async function tryGemini(
+  messages: Array<{ role: string; content: string }>
+): Promise<NextResponse | null> {
+  const apiKey = process.env.GEMINI_API_KEY
+  if (!apiKey) return null
+
+  const geminiMessages = messages.map(m => ({
+    role: m.role === 'assistant' ? 'model' : 'user',
+    parts: [{ text: m.content }],
+  }))
+
+  try {
+    const res = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:streamGenerateContent?alt=sse&key=${apiKey}`,
+      {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          system_instruction: { parts: [{ text: ARGUS_SYSTEM_PROMPT }] },
+          contents: geminiMessages,
+          generationConfig: { maxOutputTokens: 16000, temperature: 0.7 },
+        }),
+      }
+    )
+
+    if (!res.ok || !res.body) return null
+
+    const encoder = new TextEncoder()
+    const decoder = new TextDecoder()
+
+    const stream = new ReadableStream<Uint8Array>({
+      async start(controller) {
+        const reader = res.body!.getReader()
+        let buffer = ''
+        try {
+          while (true) {
+            const { done, value } = await reader.read()
+            if (done) break
+            buffer += decoder.decode(value, { stream: true })
+            const lines = buffer.split('\n')
+            buffer = lines.pop() ?? ''
+            for (const line of lines) {
+              if (!line.startsWith('data: ')) continue
+              const data = line.slice(6).trim()
+              if (data === '[DONE]') continue
+              try {
+                const event = JSON.parse(data)
+                const text = event?.candidates?.[0]?.content?.parts?.[0]?.text
+                if (typeof text === 'string') {
+                  controller.enqueue(encoder.encode(text))
+                }
+              } catch { /* skip */ }
+            }
+          }
+        } finally {
+          reader.releaseLock()
+          controller.close()
+        }
+      },
+    })
+
+    return new NextResponse(stream, {
+      status: 200,
+      headers: {
+        'Content-Type': 'text/plain; charset=utf-8',
+        'Cache-Control': 'no-store',
+        'X-Provider': 'gemini',
+      },
+    })
+  } catch { return null }
+}
+
 export async function POST(request: NextRequest) {
-  const clientIp = request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
+  const clientIp =
+    request.headers.get('x-forwarded-for')?.split(',')[0]?.trim() ?? 'unknown'
 
   if (isRateLimited(clientIp)) {
     return NextResponse.json({ error: 'Rate limited.' }, { status: 429 })
@@ -121,36 +243,16 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: 'Invalid history format.' }, { status: 400 })
   }
 
-  const apiKey = process.env.ANTHROPIC_API_KEY
-  if (!apiKey) {
-    return NextResponse.json({ error: 'Server configuration error.' }, { status: 500 })
-  }
+  const messages = [...history, { role: 'user', content: prompt }]
 
-  const anthropicResponse = await fetch('https://api.anthropic.com/v1/messages', {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      'anthropic-version': '2023-06-01',
-      'x-api-key': apiKey,
-    },
-    body: JSON.stringify({
-      model: 'claude-opus-4-20250514',
-      max_tokens: 16000,
-      system: ARGUS_SYSTEM_PROMPT,
-      messages: [...history, { role: 'user', content: prompt }],
-      stream: true,
-    }),
-  })
+  const anthropicResult = await tryAnthropic(messages)
+  if (anthropicResult) return anthropicResult
 
-  if (!anthropicResponse.ok || !anthropicResponse.body) {
-    return NextResponse.json({ error: 'Upstream API error.' }, { status: anthropicResponse.status })
-  }
+  const geminiResult = await tryGemini(messages)
+  if (geminiResult) return geminiResult
 
-  return new NextResponse(createTextStream(anthropicResponse.body), {
-    status: 200,
-    headers: {
-      'Content-Type': 'text/plain; charset=utf-8',
-      'Cache-Control': 'no-store',
-    },
-  })
-                          }
+  return NextResponse.json(
+    { error: 'All providers exhausted. Please add API credits.' },
+    { status: 503 }
+  )
+}
